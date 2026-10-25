@@ -1,0 +1,10 @@
+# 构建产物与本地配置
+local.properties
+app/build/
+build/
+.gradle/
+.idea/
+*.iml
+.cxx/
+captures/
+dist/

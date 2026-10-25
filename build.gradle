@@ -1,0 +1,4 @@
+/* 卡点 · Android 包装工程（无 AndroidX 依赖，纯框架 API） */
+plugins {
+    id 'com.android.application' version '8.6.1' apply false
+}
