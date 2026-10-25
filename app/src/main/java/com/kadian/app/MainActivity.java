@@ -12,6 +12,7 @@ import android.provider.MediaStore;
 import android.util.Base64;
 import android.util.Log;
 import android.view.View;
+import android.view.WindowInsets;
 import android.webkit.ConsoleMessage;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
@@ -68,8 +69,27 @@ public class MainActivity extends Activity {
 
         web = new WebView(this);
         setContentView(web);
+        applySystemBarInsets();
         configureWebView();
         web.loadUrl("https://" + APP_HOST + "/index.html");
+    }
+
+    /* 系统栏 insets 适配：targetSdk 35 在 Android 15+ 强制 edge-to-edge，
+       不处理时页面会画到状态栏/导航栏底下（交互区与状态栏重叠）。
+       把系统栏与刘海的安全区作为 WebView 内边距，页面视口随之避开系统栏；
+       这样 env(safe-area-inset-*) 在页面里为 0，CSS 顶部内边距不会双重叠加。 */
+    @SuppressWarnings("deprecation")
+    private void applySystemBarInsets() {
+        web.setOnApplyWindowInsetsListener((v, insets) -> {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                var t = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                v.setPadding(0, t.top, 0, t.bottom);
+                return WindowInsets.CONSUMED;
+            }
+            var si = insets.getSystemWindowInsets();
+            v.setPadding(0, si.top, 0, si.bottom);
+            return insets.consumeSystemWindowInsets();
+        });
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -197,7 +217,7 @@ public class MainActivity extends Activity {
 
             @JavascriptInterface
             public String version() {
-                return "1.1.0";
+                return "2.0.0-beta";
             }
         }, "KadianAndroid");
     }
