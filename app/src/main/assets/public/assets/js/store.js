@@ -13,10 +13,10 @@ var Store = (function () {
       maxTokens: 2000,
       extraHeaders: {}
     },
-    ocr: { engine: 'tesseract', langs: 'chi_sim+eng+jpn' },
     study: {
       dailyPracticeCount: 0,   // 0 = 只手动出题
-      subject: 'math'          // 出题默认学科
+      subject: 'japanese',     // 做题默认学科（日语 / 英语为主）
+      quizCount: 3             // 每次出题数量
     },
     lastPracticeDate: '',
     practiceCountToday: 0
@@ -116,18 +116,64 @@ var Store = (function () {
     return c;
   }
 
-  /* ---------- 语篇 ---------- */
-  async function listPassages() {
+  /* ---------- 题库语篇（passages） ---------- */
+  async function listPassages(filter) {
+    filter = filter || {};
     var all = await DB.all('passages');
-    all.sort(function (a, b) { return (b.createdAt || '').localeCompare(a.createdAt || ''); });
-    return all;
+    var out = all.filter(function (p) {
+      if (filter.subject && filter.subject !== 'all' && p.subject !== filter.subject) return false;
+      return true;
+    });
+    out.sort(function (a, b) {
+      return (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || '');
+    });
+    return out;
   }
+  async function getPassage(id) { return DB.get('passages', id); }
   async function savePassage(p) {
-    if (!p.id) { p.id = uid(); p.createdAt = nowISO(); }
-    await DB.put('passages', p);
-    return p;
+    var rec = Object.assign({}, p);
+    if (!rec.id) { rec.id = uid(); rec.createdAt = nowISO(); }
+    rec.updatedAt = nowISO();
+    rec.subject = rec.subject || 'japanese';
+    rec.title = rec.title || '未命名语篇';
+    rec.source = rec.source || '';
+    /* text 可带 |{|…|}| 标记；同时存纯文本与即点区域清单 */
+    rec.text = String(rec.text || '');
+    rec.plain = Marks.strip(rec.text);
+    rec.marks = Marks.list(rec.text);
+    rec.markCount = rec.marks.length;
+    await DB.put('passages', rec);
+    return rec;
+  }
+  /* 识别知识点后回写标记文本 */
+  async function updatePassageMarks(id, markedText) {
+    var rec = await getPassage(id);
+    if (!rec) throw new Error('语篇不存在');
+    rec.text = String(markedText || rec.text);
+    return await savePassage(rec);
   }
   async function deletePassage(id) { return DB.del('passages', id); }
+
+  /* ---------- 精讲结果缓存：同一「学科 + 片段」只问一次 API ---------- */
+  function explainKey(subject, sel) {
+    return (subject || 'other') + '::' + String(sel || '').trim();
+  }
+  async function getCachedExplain(subject, sel) {
+    var rec = await DB.get('explains', explainKey(subject, sel));
+    return rec && rec.exp ? rec.exp : null;
+  }
+  async function saveCachedExplain(subject, sel, exp) {
+    if (!exp) return null;
+    var rec = {
+      id: explainKey(subject, sel),
+      subject: subject || 'other',
+      sel: String(sel || ''),
+      exp: exp,
+      createdAt: nowISO()
+    };
+    await DB.put('explains', rec);
+    return rec;
+  }
 
   /* ---------- 图片 ---------- */
   async function saveImage(dataUrl, meta) {
@@ -155,6 +201,8 @@ var Store = (function () {
     var out = all.filter(function (p) {
       if (filter.subject && filter.subject !== 'all' && p.subject !== filter.subject) return false;
       if (filter.status && p.status !== filter.status) return false;
+      /* kind:'plain' 排除做题会话产生的题目（它们自带语篇，只在做题流里出现） */
+      if (filter.kind === 'plain' && p.kind === 'quiz') return false;
       return true;
     });
     out.sort(function (a, b) { return (b.createdAt || '').localeCompare(a.createdAt || ''); });
@@ -179,7 +227,13 @@ var Store = (function () {
     var expected = String(problem.answer || '').split('|').map(function (s) { return s.trim(); });
     if (!ua) return false;
     if (problem.type === 'choice') {
-      return expected.some(function (e) { return normAnswer(e).toUpperCase() === ua.toUpperCase(); });
+      /* 界面回传的可能是完整选项文本（"A. 回顾、回首"），也可能是选项键（"A"）——两种都要能判 */
+      var m = String(userAnswer).trim().match(/^[（(]?([A-Za-z])[)）.．、]?\s/);
+      var uaKey = m ? m[1].toUpperCase() : ua.toUpperCase();
+      return expected.some(function (e) {
+        var en = normAnswer(e).toUpperCase();
+        return en === uaKey || en === ua.toUpperCase();
+      });
     }
     return expected.some(function (e) {
       var en = normAnswer(e);
@@ -327,11 +381,114 @@ var Store = (function () {
     return { target: { subject: subject, topic: topic }, problems: problems };
   }
 
+  /* ---------- 做题（2.0 核心）：API 出题 + 语篇触点精讲 + 一键入库 ---------- */
+
+  /* 生成一组做题（语篇 + 题目），题目存入 problems（kind: 'quiz'） */
+  async function generateQuiz(subject, count) {
+    count = count || 3;
+    var quiz = await AI.generateQuiz(subject, count);
+    if (!quiz.questions.length) throw new Error('模型没有生成题目');
+    var problems = quiz.questions.map(function (q) {
+      return {
+        id: uid(),
+        kind: 'quiz',
+        type: q.type,
+        stem: String(q.stem || ''),
+        options: Array.isArray(q.options) ? q.options.map(String) : [],
+        answer: q.answer != null ? String(q.answer) : '',
+        explanation: String(q.explanation || ''),
+        point: String(q.point || ''),
+        passage: quiz.passage || '',
+        passageZh: quiz.passageZh || '',
+        source: quiz.source || '',
+        subject: subject,
+        topic: String(q.point || '未分类'),
+        status: 'pending',
+        userAnswer: '',
+        correct: null,
+        createdAt: nowISO(),
+        doneAt: ''
+      };
+    });
+    await DB.bulkPut('problems', problems);
+    return {
+      passage: quiz.passage || '',
+      passageZh: quiz.passageZh || '',
+      source: quiz.source || '',
+      problems: problems
+    };
+  }
+
+  /* 基于题库里的一段语篇出题（不另造语篇） */
+  async function generateQuizFromPassage(subject, passage, count) {
+    count = count || 3;
+    var plain = Marks.strip(String(passage || ''));
+    if (!plain) throw new Error('语篇是空的');
+    var quiz = await AI.generateQuizFromPassage(subject, plain, count);
+    if (!quiz.questions.length) throw new Error('模型没有基于这段语篇出题');
+    var problems = quiz.questions.map(function (q) {
+      return {
+        id: uid(),
+        kind: 'quiz',
+        type: q.type,
+        stem: String(q.stem || ''),
+        options: Array.isArray(q.options) ? q.options.map(String) : [],
+        answer: q.answer != null ? String(q.answer) : '',
+        explanation: String(q.explanation || ''),
+        point: String(q.point || ''),
+        passage: plain,
+        passageZh: '',
+        source: '题库语篇',
+        subject: subject,
+        topic: String(q.point || '未分类'),
+        status: 'pending',
+        userAnswer: '',
+        correct: null,
+        createdAt: nowISO(),
+        doneAt: ''
+      };
+    });
+    await DB.bulkPut('problems', problems);
+    return { passage: plain, passageZh: '', source: '题库语篇', problems: problems };
+  }
+
+  /* API 一键识别知识点：返回带 |{|…|}| 标记的语篇 */
+  async function detectPoints(subject, text) {
+    var plain = Marks.strip(String(text || ''));
+    if (!plain) throw new Error('语篇是空的');
+    var marked = await AI.detectPoints(subject, plain);
+    if (!marked || !marked.trim()) throw new Error('没有识别出知识点');
+    return marked.trim();
+  }
+
+  /* 「学会了」一键入库：触点精讲结果 → 卡点（零填表， topic 由精讲结果带出） */
+  async function savePointAsCard(subject, exp, sel, passage, source) {
+    exp = exp || {};
+    var answer = '**' + (exp.point || sel || '') + '**\n\n' +
+      (exp.meaning ? exp.meaning + '\n\n' : '') +
+      (exp.examples && exp.examples.length
+        ? exp.examples.map(function (e) {
+          return '- ' + e.src + (e.zh ? '　' + e.zh : '');
+        }).join('\n') + '\n\n'
+        : '') +
+      (exp.usage ? '**用法**：' + exp.usage + '\n\n' : '') +
+      (exp.mistake ? '**常见误用**：' + exp.mistake : '');
+    var card = {
+      subject: subject,
+      topic: exp.topic || '未分类',
+      question: exp.point || String(sel || '').slice(0, 60),
+      context: String(passage || '').slice(0, 500),
+      answer: answer,
+      source: source || '做题 · 即时精讲'
+    };
+    return await saveStuck(card);
+  }
+
   /* ---------- 今日队列 ---------- */
   async function todayQueue() {
     var cards = await DB.all('stuckPoints');
     var due = SRS.dueCards(cards);
-    var problems = await listProblems({ status: 'pending' });
+    var problems = await listProblems({ status: 'pending', kind: 'plain' });
     return {
       dueCards: due,
       pendingProblems: problems,
@@ -410,8 +567,12 @@ var Store = (function () {
     deleteStuck: deleteStuck,
     reviewStuck: reviewStuck,
     listPassages: listPassages,
+    getPassage: getPassage,
     savePassage: savePassage,
+    updatePassageMarks: updatePassageMarks,
     deletePassage: deletePassage,
+    getCachedExplain: getCachedExplain,
+    saveCachedExplain: saveCachedExplain,
     saveImage: saveImage,
     getImage: getImage,
     listImages: listImages,
@@ -425,6 +586,10 @@ var Store = (function () {
     generateForWeak: generateForWeak,
     generateForCard: generateForCard,
     generateForTopic: generateForTopic,
+    generateQuiz: generateQuiz,
+    generateQuizFromPassage: generateQuizFromPassage,
+    detectPoints: detectPoints,
+    savePointAsCard: savePointAsCard,
     todayQueue: todayQueue,
     stats: stats,
     exportAll: exportAll,

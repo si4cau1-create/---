@@ -150,11 +150,115 @@ var AI = (function () {
       '{"type":"subjective","stem":"题干","answer":"参考要点","explanation":"解析","difficulty":3}]';
   }
 
+  /* ---------- 做题（2.0 核心）提示词 ---------- */
+
+  /* 出题：一段真实风格语篇 + 基于语篇的题目（语篇是「不会→了解」的载体） */
+  function pQuiz(subject, count) {
+    var s = CONFIG.subjectName(subject);
+    return CONFIG.role(subject) +
+      '\n\n请生成一组' + s + '练习题：一段真实风格的语篇 + 基于这段语篇的 ' + count + ' 道题。\n\n' +
+      '要求：\n' +
+      '1. 语篇用' + s + '原文书写，80-200 字/词，贴近真题阅读或真实生活材料（新闻、对话、短文皆可），自然嵌入 2-4 个值得学的语法点或词汇\n' +
+      '2. 题目必须基于这段语篇作答：语境填空、语法/词义选择、理解判断混合，不考孤立记忆\n' +
+      '3. 至少一半为可自动判分的客观题（choice/fill），其余为主观题\n' +
+      '4. 每题解析要点明"考的是哪个点"，一句话即可\n' +
+      '5. 难度对准高中课标（日语约 N3-N2，英语约高考），不送分也不超纲\n\n' +
+      '只输出 JSON，不要任何其他文字。格式：\n' +
+      '{"passage":"语篇原文","passageZh":"语篇的中文翻译或概要","source":"材料风格说明，如：高考英语阅读·说明文","questions":[' +
+      '{"type":"choice","stem":"题干（涉及语篇内容）","options":["A. ...","B. ...","C. ...","D. ..."],"answer":"A","explanation":"解析","point":"考点，如：〜てしまう 的完结体"},' +
+      '{"type":"fill","stem":"题干（用____标出空）","answer":"最简答案","explanation":"解析","point":"考点"},' +
+      '{"type":"subjective","stem":"题干","answer":"参考要点","explanation":"解析","point":"考点"}]}';
+  }
+
+  /* 触点精讲：学生在语篇中选中一个不懂的片段，只讲这一段（快、准、就地） */
+  function pExplainPoint(subject, sel, passage) {
+    return CONFIG.role(subject) +
+      '\n\n学生在' + CONFIG.subjectName(subject) + '语篇中遇到了不懂的片段。**只针对这个片段讲解**，不要复述全文、不要讲无关内容。\n' +
+      '\n【语篇】\n' + (passage || '(未提供)') +
+      '\n\n【学生不懂的片段】\n' + sel +
+      '\n\n严格只输出 JSON，不要任何其他文字：\n' +
+      '{"point":"这个知识点的名称（如：词汇「顧みる」/ 语法「〜わけではない」）",' +
+      '"meaning":"一句话释义（中文）",' +
+      '"examples":[{"src":"例句原文（日文或英文）","zh":"例句中文翻译"}],' +
+      '"usage":"用法/接续/搭配/使用限制，2-3 句",' +
+      '"mistake":"最常见的一个误用，一句话",' +
+      '"topic":"归类名，用于知识点聚合，如：日语·语法·否定"}\n' +
+      '讲解务必简短——学生正在做题中，不要让他等。';
+  }
+
+  /* 没懂：换一种更简单的讲法 */
+  function pExplainPointSimpler(subject, sel, passage, prev) {
+    return pExplainPoint(subject, sel, passage) +
+      '\n\n注意：上一次的讲解学生没懂（上次讲的是：' + (prev || '') + '）。' +
+      '请换一种更简单的讲法：用最直白的话、生活化的类比，例句换成最简单的。';
+  }
+
+  /* 即点即学：题库语篇里预设好的即点区域被点击时用（比触点精讲更短，不带整篇语篇，省 token） */
+  function pExplainMarked(subject, sel, passage) {
+    return CONFIG.role(subject) +
+      '\n\n学生在' + CONFIG.subjectName(subject) + '语篇中标出了一个要学的点。**只针对这个点讲解**，不要复述周围文本、不要讲无关内容。\n' +
+      (passage ? '\n【语篇】\n' + passage + '\n' : '') +
+      '\n【要学的点】\n' + sel +
+      '\n\n严格只输出 JSON，不要任何其他文字：\n' +
+      '{"point":"这个知识点的名称","meaning":"一句话释义（中文）",' +
+      '"examples":[{"src":"例句原文（日文或英文）","zh":"例句中文翻译"}],' +
+      '"usage":"用法/接续/搭配/使用限制，2-3 句","mistake":"最常见的一个误用，一句话",' +
+      '"topic":"归类名，用于知识点聚合，如：日语·语法·否定"}';
+  }
+
+  /* 知识点一键识别：扫描语篇，把值得学的语法点/词汇用 |{|…|}| 框住后原样返回 */
+  function pDetectPoints(subject, text) {
+    return CONFIG.role(subject) +
+      '\n\n下面是一段' + CONFIG.subjectName(subject) + '语篇。请扫描全文，找出其中**值得学生专门学的语法点和词汇**，并直接输出改写后的整段语篇。\n' +
+      '\n【语篇】\n' + (text || '') +
+      '\n\n要求：\n' +
+      '1. 只标"值得学"的点：高考/考级范围内的语法、高频词、易混用法；不要标人名地名和一看就懂的简单词\n' +
+      '2. 用 |{| 和 |}| 把每个要学的点框住（例如：日本語を勉強し始めて|{|まだ半年|}だが）\n' +
+      '3. 框住的内容必须与原文逐字一致，不得改动原文其他任何字词\n' +
+      '4. 一段 150 字段落标 3-8 个点，不要贪多\n' +
+      '5. 除了标记本身，不要输出任何其他文字、不要解释、不要编号\n\n' +
+      '只输出改写后的语篇原文。';
+  }
+
+  /* 基于用户导入的语篇出题（不出新语篇） */
+  function pQuizFromPassage(subject, passage, count) {
+    return CONFIG.role(subject) +
+      '\n\n下面是一段' + CONFIG.subjectName(subject) + '语篇。请基于这段语篇出 ' + count + ' 道题。\n' +
+      '\n【语篇】\n' + passage +
+      '\n\n要求：\n' +
+      '1. 题目必须基于这段语篇作答：语境填空、语法/词义选择、理解判断混合\n' +
+      '2. 至少一半为可自动判分的客观题（choice/fill），其余为主观题\n' +
+      '3. 每题解析要点明"考的是哪个点"，一句话即可\n' +
+      '4. 难度对准高中课标（日语约 N3-N2，英语约高考）\n\n' +
+      '只输出 JSON，不要任何其他文字。格式：\n' +
+      '{"questions":[{"type":"choice","stem":"题干","options":["A. ...","B. ...","C. ...","D. ..."],"answer":"A","explanation":"解析","point":"考点"},' +
+      '{"type":"fill","stem":"题干（用____标出空）","answer":"最简答案","explanation":"解析","point":"考点"},' +
+      '{"type":"subjective","stem":"题干","answer":"参考要点","explanation":"解析","point":"考点"}]}';
+  }
+
   function extractJSON(text) {
     if (!text) throw new Error('模型没有返回内容');
     var t = String(text).trim();
     var m = t.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (m) t = m[1].trim();
+    /* 对象形态（如做题的 {passage, questions}）：首个 { 在首个 [ 之前时按对象整体解析 */
+    var iObj = t.indexOf('{'), iArr = t.indexOf('[');
+    if (iObj >= 0 && (iArr < 0 || iObj < iArr)) {
+      var eObj = t.lastIndexOf('}');
+      if (eObj > iObj) t = t.slice(iObj, eObj + 1);
+      try {
+        return JSON.parse(t);
+      } catch (err) {
+        try {
+          return JSON.parse(t
+            .replace(/,\s*([\]}])/g, '$1')
+            .replace(/[“”]/g, '"')
+            .replace(/[‘’]/g, "'"));
+        } catch (e2) {
+          throw new Error('模型返回的内容不是合法 JSON，可重试或换用更强的模型');
+        }
+      }
+    }
     var s = t.indexOf('['), e = t.lastIndexOf(']');
     if (s >= 0 && e > s) t = t.slice(s, e + 1);
     try {
@@ -205,6 +309,118 @@ var AI = (function () {
     });
   }
 
+  /* ---------- 做题（2.0 核心）：语篇出题 + 触点精讲 ---------- */
+
+  function normalizeQuiz(raw, subject) {
+    var qs = Array.isArray(raw && raw.questions) ? raw.questions : [];
+    var questions = qs.map(function (q) {
+      var type = q && q.type ? String(q.type) : 'subjective';
+      if (['choice', 'fill', 'subjective'].indexOf(type) < 0) type = 'subjective';
+      if (type === 'choice' && (!Array.isArray(q.options) || q.options.length < 2)) type = 'subjective';
+      return {
+        type: type,
+        stem: String((q && q.stem) || '').trim(),
+        options: Array.isArray(q && q.options) ? q.options.map(String) : [],
+        answer: q && q.answer != null ? String(q.answer) : '',
+        explanation: String((q && q.explanation) || '').trim(),
+        point: String((q && q.point) || '').trim()
+      };
+    }).filter(function (q) { return q.stem; });
+    return {
+      passage: String((raw && raw.passage) || '').trim(),
+      passageZh: String((raw && raw.passageZh) || '').trim(),
+      source: String((raw && raw.source) || '').trim(),
+      questions: questions
+    };
+  }
+
+  /* 生成一组做题（语篇 + 题目） */
+  async function generateQuiz(subject, count) {
+    count = count || 3;
+    var raw = await chat([
+      { role: 'user', content: pQuiz(subject, count) }
+    ], { temperature: 0.5, maxTokens: 3000, timeout: 240000 });
+    var quiz = normalizeQuiz(extractJSON(raw), subject);
+    if (!quiz.passage) throw new Error('模型没有生成语篇，可重试');
+    return quiz;
+  }
+
+  /* 讲解结果归一化（触点精讲与即点即学共用） */
+  function normalizeExplain(j, sel) {
+    return {
+      point: String((j && j.point) || '').trim() || String(sel || '').slice(0, 40),
+      meaning: String((j && j.meaning) || '').trim(),
+      examples: Array.isArray(j && j.examples)
+        ? j.examples.map(function (e) {
+          return { src: String((e && e.src) || ''), zh: String((e && e.zh) || '') };
+        }).filter(function (e) { return e.src; })
+        : [],
+      usage: String((j && j.usage) || '').trim(),
+      mistake: String((j && j.mistake) || '').trim(),
+      topic: String((j && j.topic) || '').trim()
+    };
+  }
+
+  /* 触点精讲：返回结构化讲解（point/meaning/examples/usage/mistake/topic） */
+  async function explainPoint(subject, sel, passage, opts) {
+    opts = opts || {};
+    var prompt = opts.simpler
+      ? pExplainPointSimpler(subject, sel, passage, opts.prev)
+      : pExplainPoint(subject, sel, passage);
+    var raw = await chat([
+      { role: 'user', content: prompt }
+    ], { temperature: 0.2, maxTokens: 900, timeout: 120000 });
+    return normalizeExplain(extractJSON(raw), sel);
+  }
+
+  /* 即点即学：题库预设的即点区域被点击 */
+  async function explainMarked(subject, sel, passage) {
+    var raw = await chat([
+      { role: 'user', content: pExplainMarked(subject, sel, passage) }
+    ], { temperature: 0.2, maxTokens: 900, timeout: 120000 });
+    return normalizeExplain(extractJSON(raw), sel);
+  }
+
+  /* 知识点一键识别：返回带 |{|…|}| 标记的语篇 */
+  async function detectPoints(subject, plainText) {
+    var raw = await chat([
+      { role: 'user', content: pDetectPoints(subject, plainText) }
+    ], { temperature: 0.2, maxTokens: 2000, timeout: 180000 });
+    var t = String(raw || '').trim();
+    /* 模型偶尔会加围栏或前后废话：截取从第一个非空字符开始、到最后一个非空字符 */
+    if (t.indexOf('```') >= 0) {
+      var m = t.match(/```(?:[a-zA-Z]*)?\s*([\s\S]*?)```/);
+      if (m) t = m[1].trim();
+    }
+    if (!t) throw new Error('模型没有返回内容');
+    return t;
+  }
+
+  /* 基于指定语篇出题 */
+  async function generateQuizFromPassage(subject, passage, count) {
+    count = count || 3;
+    var raw = await chat([
+      { role: 'user', content: pQuizFromPassage(subject, passage, count) }
+    ], { temperature: 0.5, maxTokens: 2400, timeout: 240000 });
+    var j = extractJSON(raw);
+    var qs = Array.isArray(j && j.questions) ? j.questions : (Array.isArray(j) ? j : []);
+    return {
+      questions: qs.map(function (q) {
+        var type = q && q.type ? String(q.type) : 'subjective';
+        if (['choice', 'fill', 'subjective'].indexOf(type) < 0) type = 'subjective';
+        if (type === 'choice' && (!Array.isArray(q.options) || q.options.length < 2)) type = 'subjective';
+        return {
+          type: type,
+          stem: String((q && q.stem) || '').trim(),
+          options: Array.isArray(q && q.options) ? q.options.map(String) : [],
+          answer: q && q.answer != null ? String(q.answer) : '',
+          explanation: String((q && q.explanation) || '').trim(),
+          point: String((q && q.point) || '').trim()
+        };
+      }).filter(function (q) { return q.stem; })
+    };
+  }
+
   /* 连通性自检 */
   async function testConnection() {
     var r = await chat([{ role: 'user', content: '回复两个字：正常' }], { temperature: 0, maxTokens: 16, timeout: 30000 });
@@ -219,13 +435,23 @@ var AI = (function () {
     chat: chat,
     vision: vision,
     generatePractice: generatePractice,
+    generateQuiz: generateQuiz,
+    generateQuizFromPassage: generateQuizFromPassage,
+    explainPoint: explainPoint,
+    explainMarked: explainMarked,
+    detectPoints: detectPoints,
     extractJSON: extractJSON,
     testConnection: testConnection,
     prompts: {
       explainSelection: pExplainSelection,
       explainWhole: pExplainWhole,
       ocr: pOCR,
-      practice: pPractice
+      practice: pPractice,
+      quiz: pQuiz,
+      quizFromPassage: pQuizFromPassage,
+      detectPoints: pDetectPoints,
+      explainPoint: pExplainPoint,
+      explainMarked: pExplainMarked
     }
   };
 })();
