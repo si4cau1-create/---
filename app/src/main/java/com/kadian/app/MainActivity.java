@@ -217,7 +217,7 @@ public class MainActivity extends Activity {
 
             @JavascriptInterface
             public String version() {
-                return "2.0.0-beta";
+                return "2.1.0-beta";
             }
         }, "KadianAndroid");
     }

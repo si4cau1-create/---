@@ -170,12 +170,14 @@ var AI = (function () {
       '{"type":"subjective","stem":"题干","answer":"参考要点","explanation":"解析","point":"考点"}]}';
   }
 
-  /* 触点精讲：学生在语篇中选中一个不懂的片段，只讲这一段（快、准、就地） */
-  function pExplainPoint(subject, sel, passage) {
+  /* 触点精讲：学生在语篇中选中一个不懂的片段，只讲这一段（快、准、就地）
+     question：学生自己写的问题（有则优先回答，别自作主张换话题） */
+  function pExplainPoint(subject, sel, passage, question) {
     return CONFIG.role(subject) +
       '\n\n学生在' + CONFIG.subjectName(subject) + '语篇中遇到了不懂的片段。**只针对这个片段讲解**，不要复述全文、不要讲无关内容。\n' +
       '\n【语篇】\n' + (passage || '(未提供)') +
       '\n\n【学生不懂的片段】\n' + sel +
+      (question ? '\n\n【学生的问题】\n' + question + '\n（优先回答学生问到的这个点；若问题与片段无关，先回答问题，再顺带解释片段）' : '') +
       '\n\n严格只输出 JSON，不要任何其他文字：\n' +
       '{"point":"这个知识点的名称（如：词汇「顧みる」/ 语法「〜わけではない」）",' +
       '"meaning":"一句话释义（中文）",' +
@@ -187,8 +189,8 @@ var AI = (function () {
   }
 
   /* 没懂：换一种更简单的讲法 */
-  function pExplainPointSimpler(subject, sel, passage, prev) {
-    return pExplainPoint(subject, sel, passage) +
+  function pExplainPointSimpler(subject, sel, passage, prev, question) {
+    return pExplainPoint(subject, sel, passage, question) +
       '\n\n注意：上一次的讲解学生没懂（上次讲的是：' + (prev || '') + '）。' +
       '请换一种更简单的讲法：用最直白的话、生活化的类比，例句换成最简单的。';
   }
@@ -206,21 +208,7 @@ var AI = (function () {
       '"topic":"归类名，用于知识点聚合，如：日语·语法·否定"}';
   }
 
-  /* 知识点一键识别：扫描语篇，把值得学的语法点/词汇用 |{|…|}| 框住后原样返回 */
-  function pDetectPoints(subject, text) {
-    return CONFIG.role(subject) +
-      '\n\n下面是一段' + CONFIG.subjectName(subject) + '语篇。请扫描全文，找出其中**值得学生专门学的语法点和词汇**，并直接输出改写后的整段语篇。\n' +
-      '\n【语篇】\n' + (text || '') +
-      '\n\n要求：\n' +
-      '1. 只标"值得学"的点：高考/考级范围内的语法、高频词、易混用法；不要标人名地名和一看就懂的简单词\n' +
-      '2. 用 |{| 和 |}| 把每个要学的点框住（例如：日本語を勉強し始めて|{|まだ半年|}だが）\n' +
-      '3. 框住的内容必须与原文逐字一致，不得改动原文其他任何字词\n' +
-      '4. 一段 150 字段落标 3-8 个点，不要贪多\n' +
-      '5. 除了标记本身，不要输出任何其他文字、不要解释、不要编号\n\n' +
-      '只输出改写后的语篇原文。';
-  }
-
-  /* 基于用户导入的语篇出题（不出新语篇） */
+  /* 知识点一键识别：扫描语篇，把值得学的语法点/词汇用 |{|…|}| 框住后原样返回 *//* 基于用户导入的语篇出题（不出新语篇） */
   function pQuizFromPassage(subject, passage, count) {
     return CONFIG.role(subject) +
       '\n\n下面是一段' + CONFIG.subjectName(subject) + '语篇。请基于这段语篇出 ' + count + ' 道题。\n' +
@@ -234,6 +222,39 @@ var AI = (function () {
       '{"questions":[{"type":"choice","stem":"题干","options":["A. ...","B. ...","C. ...","D. ..."],"answer":"A","explanation":"解析","point":"考点"},' +
       '{"type":"fill","stem":"题干（用____标出空）","answer":"最简答案","explanation":"解析","point":"考点"},' +
       '{"type":"subjective","stem":"题干","answer":"参考要点","explanation":"解析","point":"考点"}]}';
+  }
+
+  /* ---------- 单词（背诵板块）提示词 ---------- */
+
+  /* 词条生成：按用户约定的《日语单词背诵输出提示词》规则 */
+  function pWordEntries(subject, words) {
+    return '你是日语词汇编纂助手。请把给定的词表整理成结构化词条。\n' +
+      '\n【词表】（共 ' + (words || []).length + ' 个）\n' + (words || []).map(function (w) { return w.word; }).join('\n') +
+      '\n\n【输出】只输出 JSON，不要任何其他文字：\n' +
+      '{"words":[{"word":"売り上げる","reading":"うりあげる","pos":"v2","transitivity":"vt",' +
+      '"meaning":"售出","example":"この店は去年、物件を売り上げた。","exampleZh":"这家店去年把房子卖了。"}]}\n' +
+      '\n【规则】\n' +
+      '1. word 一律用**辞书形（原形）**，动词尤其如此\n' +
+      '2. pos 只能用这些缩写：adj1（一类形容词）、adj2（二类形容词）、n（名词）、pron（代词）、' +
+      'v1 / v2 / v3（各类动词）、adv（副词）、conj（接续词）、prep（助词）\n' +
+      '3. transitivity 只对动词填：vt（他动词）/ vi（自动词）/ vt/vi（自他动词）；非动词填空字符串\n' +
+      '4. meaning 用中文释义，最多 2 条；无歧义时只写 1 条；避免容易混淆的译法\n' +
+      '5. reading 写平假名读音；example 给一个用上该词的短句（贴近常见用法），exampleZh 给中文翻译\n' +
+      '6. 《新标日》等教材词汇须联网检索校验假名、词性、释义；无法确认的词直接跳过，不要瞎写\n' +
+      '7. 词表里的每个词都要处理（除非按第 6 条跳过）';
+  }
+
+  /* 词汇量调查：判断用户对每个词是否已掌握 */
+  function pVocabularyCheck(subject, words) {
+    return '你是日语词汇量评估助手。判断下面每个词，对以日语为学习语言的用户而言是否属于「已掌握」。\n' +
+      '\n【词表】（共 ' + (words || []).length + ' 个）\n' + (words || []).map(function (w) { return w.word; }).join('\n') +
+      '\n\n【判断标准】\n' +
+      '1. 「已掌握」= 能直接理解该词在句中的意思并顺畅读完（常见词、基础词、高频词）\n' +
+      '2. 「未掌握」= 需要查词典才懂（生僻词、抽象名词、复杂动词、需辨析的近义词）\n' +
+      '3. 严格按词表顺序输出，一个不漏、顺序不变\n' +
+      '4. reason 用中文一句话说明为什么（≤20 字）\n\n' +
+      '只输出 JSON，不要任何其他文字：\n' +
+      '{"results":[{"word":"…","known":true,"reason":"…"}]}';
   }
 
   function extractJSON(text) {
@@ -365,8 +386,8 @@ var AI = (function () {
   async function explainPoint(subject, sel, passage, opts) {
     opts = opts || {};
     var prompt = opts.simpler
-      ? pExplainPointSimpler(subject, sel, passage, opts.prev)
-      : pExplainPoint(subject, sel, passage);
+      ? pExplainPointSimpler(subject, sel, passage, opts.prev, opts.question)
+      : pExplainPoint(subject, sel, passage, opts.question);
     var raw = await chat([
       { role: 'user', content: prompt }
     ], { temperature: 0.2, maxTokens: 900, timeout: 120000 });
@@ -381,22 +402,7 @@ var AI = (function () {
     return normalizeExplain(extractJSON(raw), sel);
   }
 
-  /* 知识点一键识别：返回带 |{|…|}| 标记的语篇 */
-  async function detectPoints(subject, plainText) {
-    var raw = await chat([
-      { role: 'user', content: pDetectPoints(subject, plainText) }
-    ], { temperature: 0.2, maxTokens: 2000, timeout: 180000 });
-    var t = String(raw || '').trim();
-    /* 模型偶尔会加围栏或前后废话：截取从第一个非空字符开始、到最后一个非空字符 */
-    if (t.indexOf('```') >= 0) {
-      var m = t.match(/```(?:[a-zA-Z]*)?\s*([\s\S]*?)```/);
-      if (m) t = m[1].trim();
-    }
-    if (!t) throw new Error('模型没有返回内容');
-    return t;
-  }
-
-  /* 基于指定语篇出题 */
+  /* 知识点一键识别：返回带 |{|…|}| 标记的语篇 *//* 基于指定语篇出题 */
   async function generateQuizFromPassage(subject, passage, count) {
     count = count || 3;
     var raw = await chat([
@@ -421,6 +427,44 @@ var AI = (function () {
     };
   }
 
+  /* 词条生成：返回 [{word, reading, pos, transitivity, meaning, example, exampleZh}] */
+  async function generateWordEntries(subject, words) {
+    if (!words || !words.length) throw new Error('词表是空的');
+    var raw = await chat([
+      { role: 'user', content: pWordEntries(subject, words) }
+    ], { temperature: 0.2, maxTokens: 6000, timeout: 300000 });
+    var j = extractJSON(raw);
+    var arr = Array.isArray(j && j.words) ? j.words : (Array.isArray(j) ? j : []);
+    return arr.map(function (w) {
+      return {
+        word: String((w && w.word) || '').trim(),
+        reading: String((w && w.reading) || '').trim(),
+        pos: String((w && w.pos) || '').trim(),
+        transitivity: String((w && w.transitivity) || '').trim(),
+        meaning: String((w && w.meaning) || '').trim(),
+        example: String((w && w.example) || '').trim(),
+        exampleZh: String((w && w.exampleZh) || '').trim()
+      };
+    }).filter(function (w) { return w.word; });
+  }
+
+  /* 词汇量调查：返回 [{word, known, reason}] */
+  async function checkVocabulary(subject, words) {
+    if (!words || !words.length) throw new Error('词表是空的');
+    var raw = await chat([
+      { role: 'user', content: pVocabularyCheck(subject, words) }
+    ], { temperature: 0.2, maxTokens: 4000, timeout: 240000 });
+    var j = extractJSON(raw);
+    var arr = Array.isArray(j && j.results) ? j.results : (Array.isArray(j) ? j : []);
+    return arr.map(function (r) {
+      return {
+        word: String((r && r.word) || '').trim(),
+        known: !!(r && r.known),
+        reason: String((r && r.reason) || '').trim()
+      };
+    }).filter(function (r) { return r.word; });
+  }
+
   /* 连通性自检 */
   async function testConnection() {
     var r = await chat([{ role: 'user', content: '回复两个字：正常' }], { temperature: 0, maxTokens: 16, timeout: 30000 });
@@ -437,9 +481,10 @@ var AI = (function () {
     generatePractice: generatePractice,
     generateQuiz: generateQuiz,
     generateQuizFromPassage: generateQuizFromPassage,
+    generateWordEntries: generateWordEntries,
+    checkVocabulary: checkVocabulary,
     explainPoint: explainPoint,
-    explainMarked: explainMarked,
-    detectPoints: detectPoints,
+    explainMarked: explainMarked,
     extractJSON: extractJSON,
     testConnection: testConnection,
     prompts: {
@@ -448,8 +493,9 @@ var AI = (function () {
       ocr: pOCR,
       practice: pPractice,
       quiz: pQuiz,
-      quizFromPassage: pQuizFromPassage,
-      detectPoints: pDetectPoints,
+      quizFromPassage: pQuizFromPassage,
+      wordEntries: pWordEntries,
+      vocabularyCheck: pVocabularyCheck,
       explainPoint: pExplainPoint,
       explainMarked: pExplainMarked
     }
